@@ -1,0 +1,42 @@
+# Git
+.git
+.gitignore
+
+# Python
+__pycache__
+*.py[cod]
+*$py.class
+*.so
+.Python
+.venv
+venv
+ENV
+env
+.pytest_cache
+*.egg-info
+dist
+build
+
+# IDE
+.idea
+.vscode
+*.swp
+*.swo
+
+# Config with secrets
+config/config.yaml
+
+# Tests and examples (not needed in production)
+tests/
+examples/
+
+# Docs (keep README for reference)
+*.md
+!README.md
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Makefile not needed in container
+Makefile

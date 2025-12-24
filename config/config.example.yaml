@@ -1,0 +1,53 @@
+# TrainForgeConductor Configuration
+# 
+# Copy this file to config.yaml and add your API keys:
+#   cp config/config.example.yaml config/config.yaml
+
+conductor:
+  # Scheduling strategy:
+  #   - round_robin: Alternate between providers (balanced, recommended)
+  #   - least_loaded: Use provider with most capacity (max throughput)
+  #   - sequential: Fill one provider before moving to next
+  scheduling_strategy: round_robin
+  request_timeout: 120
+  max_retries: 3
+  retry_delay: 1.0
+
+# Custom model name mappings (optional)
+# Use unified names like "llama-70b" in your requests
+# The conductor automatically translates to provider-specific names
+#
+# models:
+#   my-fast-model:
+#     cerebras: "llama3.1-8b"
+#     nvidia: "meta/llama-3.1-8b-instruct"
+#   my-smart-model:
+#     cerebras: "llama-3.3-70b"
+#     nvidia: "meta/llama-3.3-70b-instruct"
+
+# Built-in model mappings (you don't need to configure these):
+#   llama-70b  -> cerebras: llama-3.3-70b, nvidia: meta/llama-3.3-70b-instruct
+#   llama-8b   -> cerebras: llama3.1-8b, nvidia: meta/llama-3.1-8b-instruct
+
+providers:
+  cerebras:
+    enabled: true
+    base_url: https://api.cerebras.ai/v1
+    keys:
+      # Get your key at: https://cloud.cerebras.ai/
+      # Rate limits (free tier): 30 RPM, 60k TPM
+      - name: cerebras-main
+        api_key: csk-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+        requests_per_minute: 30
+        tokens_per_minute: 60000
+
+  nvidia:
+    enabled: true
+    base_url: https://integrate.api.nvidia.com/v1
+    keys:
+      # Get your key at: https://build.nvidia.com/
+      # Rate limits: 40 RPM
+      - name: nvidia-main
+        api_key: nvapi-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+        requests_per_minute: 40
+        tokens_per_minute: 100000

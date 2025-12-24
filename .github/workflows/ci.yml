@@ -1,0 +1,89 @@
+name: CI
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+    branches: [main, master]
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install ruff
+      
+      - name: Lint with ruff
+        run: ruff check app/
+
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev]"
+      
+      - name: Create test config
+        run: |
+          mkdir -p config
+          cat > config/config.yaml << 'EOF'
+          conductor:
+            scheduling_strategy: round_robin
+          providers:
+            cerebras:
+              enabled: false
+              keys: []
+            nvidia:
+              enabled: false
+              keys: []
+          EOF
+      
+      - name: Test imports
+        run: |
+          python -c "from app.main import app; print('Import OK')"
+          python -c "from app.scheduler import Scheduler; print('Scheduler OK')"
+          python -c "from app.providers import CerebrasProvider, NvidiaProvider; print('Providers OK')"
+
+  docker:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Build Docker image
+        run: docker build -t trainforge-conductor .
+      
+      - name: Test Docker image
+        run: |
+          mkdir -p config
+          cat > config/config.yaml << 'EOF'
+          conductor:
+            scheduling_strategy: round_robin
+          providers:
+            cerebras:
+              enabled: false
+              keys: []
+            nvidia:
+              enabled: false
+              keys: []
+          EOF
+          docker run -d --name test-conductor -p 8000:8000 -v $(pwd)/config:/app/config trainforge-conductor
+          sleep 5
+          curl -f http://localhost:8000/health || exit 1
+          docker stop test-conductor
