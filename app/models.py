@@ -24,6 +24,17 @@ class ChatCompletionRequest(BaseModel):
     # Conductor-specific fields
     provider: Optional[str] = None  # Force specific provider
     priority: int = Field(default=0, ge=0, le=10)  # Higher = more priority
+    auto_retry: bool = Field(
+        default=True,
+        description="Automatically retry on failures (rate limits, provider errors). "
+        "When enabled, the conductor retries with exponential backoff instead of returning errors.",
+    )
+    max_retries: int = Field(
+        default=10,
+        ge=1,
+        le=50,
+        description="Maximum retry attempts when auto_retry is enabled.",
+    )
 
 
 class ChatCompletionChoice(BaseModel):
@@ -52,6 +63,10 @@ class ChatCompletionResponse(BaseModel):
     # Conductor metadata
     provider: str
     provider_key_name: Optional[str] = None
+    retry_count: int = Field(
+        default=0,
+        description="Number of retry attempts before success (0 = succeeded on first try).",
+    )
 
 
 class BatchRequest(BaseModel):

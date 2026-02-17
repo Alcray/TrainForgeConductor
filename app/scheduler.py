@@ -16,6 +16,7 @@ from app.exceptions import (
     CapabilityError,
     ProviderUnavailableError,
     AllProvidersExhaustedError,
+    MaxRetriesExhaustedError,
 )
 
 logger = structlog.get_logger()
@@ -135,13 +136,174 @@ class Scheduler:
         """
         Submit a request for scheduling.
         
-        If wait=True, blocks until the request is completed.
-        If wait=False, returns a Future that can be awaited later.
+        When auto_retry is enabled (default), the conductor automatically retries
+        on transient failures (rate limits, provider unavailability) with exponential
+        backoff, up to max_retries attempts. The user gets either a successful
+        response or a MaxRetriesExhaustedError with a full retry log.
+        
+        When auto_retry is disabled, behavior is unchanged: try immediately, then
+        queue the request and wait for capacity.
         """
-        # Estimate tokens for rate limiting
         estimated_tokens = self._estimate_tokens(request)
         
-        # First, try to execute immediately if capacity available
+        if request.auto_retry:
+            return await self._submit_with_retry(
+                request, estimated_tokens, request.max_retries,
+            )
+        else:
+            return await self._submit_no_retry(request, estimated_tokens, wait)
+    
+    async def _submit_with_retry(
+        self,
+        request: ChatCompletionRequest,
+        estimated_tokens: int,
+        max_retries: int,
+    ) -> ChatCompletionResponse:
+        """
+        Submit with persistent auto-retry on failures.
+        
+        Retries with exponential backoff (2s, 4s, 8s, ... capped at 30s).
+        Early-terminates if all errors are non-retryable (e.g. CapabilityError).
+        Returns the response with retry_count set on success.
+        Raises MaxRetriesExhaustedError with full retry log on exhaustion.
+        """
+        retry_log: list[dict] = []
+        start_time = datetime.now()
+        
+        for attempt in range(max_retries + 1):
+            try:
+                result = await self._try_immediate_execution(request, estimated_tokens)
+                
+                if result is not None:
+                    # Success — stamp the retry count and return
+                    result.retry_count = attempt
+                    if attempt > 0:
+                        await logger.ainfo(
+                            "Request succeeded after retries",
+                            retry_count=attempt,
+                            total_duration=(datetime.now() - start_time).total_seconds(),
+                        )
+                    return result
+                
+                # No capacity available (all keys rate-limited, no errors)
+                if attempt >= max_retries:
+                    raise MaxRetriesExhaustedError(
+                        retry_log=retry_log,
+                        total_attempts=attempt + 1,
+                        total_duration_seconds=(datetime.now() - start_time).total_seconds(),
+                    )
+                
+                backoff = min(2 ** (attempt + 1), 30)
+                retry_log.append({
+                    "attempt": attempt + 1,
+                    "timestamp": datetime.now().isoformat(),
+                    "error_type": "no_capacity",
+                    "error_message": "No provider capacity available, waiting for rate limits to reset",
+                    "provider_errors": [],
+                    "wait_seconds": backoff,
+                })
+                
+                await logger.awarning(
+                    "No capacity available, auto-retrying",
+                    attempt=attempt + 1,
+                    max_retries=max_retries,
+                    backoff_seconds=backoff,
+                )
+                await asyncio.sleep(backoff)
+                
+            except AllProvidersExhaustedError as e:
+                # Check for early termination: if every error is a CapabilityError
+                # (permanent, not transient), retrying will never help.
+                all_capability = (
+                    e.errors
+                    and all(isinstance(err, CapabilityError) for err in e.errors)
+                )
+                
+                if attempt >= max_retries or all_capability:
+                    duration = (datetime.now() - start_time).total_seconds()
+                    # Log the final failed attempt before raising
+                    retry_log.append({
+                        "attempt": attempt + 1,
+                        "timestamp": datetime.now().isoformat(),
+                        "error_type": type(e).__name__,
+                        "error_message": str(e),
+                        "provider_errors": [
+                            {
+                                "provider": err.provider,
+                                "type": type(err).__name__,
+                                "message": err.message,
+                            }
+                            for err in e.errors
+                        ],
+                        "wait_seconds": 0,
+                    })
+                    raise MaxRetriesExhaustedError(
+                        retry_log=retry_log,
+                        total_attempts=attempt + 1,
+                        total_duration_seconds=duration,
+                        final_error=e,
+                    )
+                
+                # Compute backoff, respecting retry-after from rate limit errors
+                base_backoff = min(2 ** (attempt + 1), 30)
+                retry_after_hint = max(
+                    (
+                        getattr(err, "retry_after", None) or 0
+                        for err in e.errors
+                        if isinstance(err, RateLimitError)
+                    ),
+                    default=0,
+                )
+                backoff = max(base_backoff, retry_after_hint)
+                # Still cap the backoff at a reasonable ceiling
+                backoff = min(backoff, 60)
+                
+                retry_log.append({
+                    "attempt": attempt + 1,
+                    "timestamp": datetime.now().isoformat(),
+                    "error_type": type(e).__name__,
+                    "error_message": str(e),
+                    "provider_errors": [
+                        {
+                            "provider": err.provider,
+                            "type": type(err).__name__,
+                            "message": err.message,
+                        }
+                        for err in e.errors
+                    ],
+                    "wait_seconds": backoff,
+                })
+                
+                await logger.awarning(
+                    "All providers exhausted, auto-retrying",
+                    attempt=attempt + 1,
+                    max_retries=max_retries,
+                    backoff_seconds=backoff,
+                    errors=[str(err) for err in e.errors],
+                )
+                await asyncio.sleep(backoff)
+            
+            except MaxRetriesExhaustedError:
+                raise
+        
+        # Safety net — should not normally be reached
+        raise MaxRetriesExhaustedError(
+            retry_log=retry_log,
+            total_attempts=max_retries + 1,
+            total_duration_seconds=(datetime.now() - start_time).total_seconds(),
+        )
+    
+    async def _submit_no_retry(
+        self,
+        request: ChatCompletionRequest,
+        estimated_tokens: int,
+        wait: bool = True,
+    ) -> ChatCompletionResponse:
+        """
+        Original submit behavior: try immediately, then queue.
+        
+        Used when auto_retry is disabled.
+        """
         result = await self._try_immediate_execution(request, estimated_tokens)
         if result:
             return result

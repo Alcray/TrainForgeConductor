@@ -93,3 +93,23 @@ class AllProvidersExhaustedError(Exception):
             error_details.append(f"  - {err.provider}: {err.message}")
         
         return "All providers failed:\n" + "\n".join(error_details)
+
+
+class MaxRetriesExhaustedError(Exception):
+    """Raised when auto-retry exhausts all retry attempts."""
+    
+    def __init__(
+        self,
+        retry_log: list[dict],
+        total_attempts: int,
+        total_duration_seconds: float,
+        final_error: Optional[Exception] = None,
+    ):
+        self.retry_log = retry_log
+        self.total_attempts = total_attempts
+        self.total_duration_seconds = total_duration_seconds
+        self.final_error = final_error
+        super().__init__(
+            f"Request failed after {total_attempts} attempts "
+            f"over {total_duration_seconds:.1f}s"
+        )

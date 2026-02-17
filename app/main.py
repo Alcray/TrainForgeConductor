@@ -24,6 +24,7 @@ from app.rate_limiter import RateLimitBucket
 from app.models_mapping import ModelMapper, DEFAULT_MODEL
 from app.exceptions import (
     AllProvidersExhaustedError,
+    MaxRetriesExhaustedError,
     RateLimitError,
     CapabilityError,
     ProviderUnavailableError,
@@ -251,6 +252,10 @@ async def chat_completion(request: ChatCompletionRequest):
     - model: Model to use (default: llama-70b). Use unified names.
     - provider: Force a specific provider (e.g., "cerebras" or "nvidia")
     - priority: Request priority (0-10, higher = more priority)
+    - auto_retry: Automatically retry on failures with exponential backoff (default: true).
+      When enabled, the conductor absorbs transient errors and keeps retrying until it gets
+      a response or exhausts max_retries, so the caller always gets an answer.
+    - max_retries: Maximum number of retry attempts when auto_retry is enabled (default: 10).
     """
     if not scheduler:
         raise HTTPException(status_code=503, detail="Scheduler not initialized")
@@ -264,8 +269,26 @@ async def chat_completion(request: ChatCompletionRequest):
     try:
         response = await scheduler.submit(request, wait=True)
         return response
+    except MaxRetriesExhaustedError as e:
+        # Auto-retry exhausted all attempts — return full retry log
+        await logger.aerror(
+            "Auto-retry exhausted",
+            total_attempts=e.total_attempts,
+            total_duration_seconds=e.total_duration_seconds,
+            retry_log_entries=len(e.retry_log),
+        )
+        raise HTTPException(
+            status_code=503,
+            detail={
+                "error": "max_retries_exhausted",
+                "message": str(e),
+                "total_attempts": e.total_attempts,
+                "total_duration_seconds": round(e.total_duration_seconds, 2),
+                "retry_log": e.retry_log,
+            },
+        )
     except AllProvidersExhaustedError as e:
-        # All providers failed - return detailed error
+        # All providers failed (auto_retry=False path) - return detailed error
         await logger.aerror(
             "All providers exhausted",
             error_count=len(e.errors),
