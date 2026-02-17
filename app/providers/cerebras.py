@@ -13,6 +13,11 @@ from app.models import (
 )
 from app.providers.base import BaseProvider, ProviderKey
 from app.models_mapping import ModelMapper
+from app.exceptions import (
+    RateLimitError,
+    CapabilityError,
+    ProviderUnavailableError,
+)
 
 logger = structlog.get_logger()
 
@@ -103,11 +108,70 @@ class CerebrasProvider(BaseProvider):
             )
             
         except httpx.HTTPStatusError as e:
+            status_code = e.response.status_code
+            response_text = e.response.text
+            
             await logger.aerror(
                 "Cerebras API error",
-                status_code=e.response.status_code,
-                response=e.response.text,
+                status_code=status_code,
+                response=response_text,
+                key_name=key.key_name,
             )
+            
+            # Handle rate limit (429)
+            if status_code == 429:
+                # Try to extract retry-after header
+                retry_after = e.response.headers.get("retry-after")
+                retry_seconds = float(retry_after) if retry_after else None
+                raise RateLimitError(
+                    provider=self.name,
+                    retry_after=retry_seconds,
+                    message=f"Rate limit exceeded: {response_text[:200]}",
+                )
+            
+            # Handle server errors (5xx) - provider temporarily unavailable
+            if 500 <= status_code < 600:
+                raise ProviderUnavailableError(
+                    provider=self.name,
+                    status_code=status_code,
+                    message=f"Cerebras server error: {response_text[:200]}",
+                )
+            
+            # Handle capability/validation errors (400)
+            if status_code == 400:
+                # Check for known capability issues
+                response_lower = response_text.lower()
+                if "image" in response_lower or "vision" in response_lower or "multimodal" in response_lower:
+                    raise CapabilityError(
+                        provider=self.name,
+                        capability="vision",
+                        message=f"Vision/image not supported: {response_text[:200]}",
+                    )
+                if "tool" in response_lower or "function" in response_lower:
+                    raise CapabilityError(
+                        provider=self.name,
+                        capability="tool_calls",
+                        message=f"Tool calling error: {response_text[:200]}",
+                    )
+                # Generic capability error
+                raise CapabilityError(
+                    provider=self.name,
+                    capability="unknown",
+                    message=f"Request error: {response_text[:200]}",
+                )
+            
+            # Re-raise other errors
+            raise
+            
+        except httpx.TimeoutException as e:
+            await logger.aerror("Cerebras request timeout", error=str(e))
+            raise ProviderUnavailableError(
+                provider=self.name,
+                status_code=504,
+                message=f"Request timeout: {str(e)}",
+            )
+        except (RateLimitError, CapabilityError, ProviderUnavailableError):
+            # Re-raise our custom exceptions
             raise
         except Exception as e:
             await logger.aerror("Cerebras request failed", error=str(e))

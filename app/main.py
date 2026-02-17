@@ -22,6 +22,12 @@ from app.providers import CerebrasProvider, NvidiaProvider
 from app.providers.base import ProviderKey
 from app.rate_limiter import RateLimitBucket
 from app.models_mapping import ModelMapper, DEFAULT_MODEL
+from app.exceptions import (
+    AllProvidersExhaustedError,
+    RateLimitError,
+    CapabilityError,
+    ProviderUnavailableError,
+)
 
 # Configure structured logging
 structlog.configure(
@@ -212,6 +218,8 @@ async def get_status():
             requests_per_minute=p["requests_per_minute"],
             tokens_per_minute=p["tokens_per_minute"],
             reset_at=p["reset_at"],
+            is_exhausted=p.get("is_exhausted", False),
+            exhausted_at=p.get("exhausted_at"),
             is_available=p["is_available"],
         )
         for p in status["providers"]
@@ -256,16 +264,54 @@ async def chat_completion(request: ChatCompletionRequest):
     try:
         response = await scheduler.submit(request, wait=True)
         return response
+    except AllProvidersExhaustedError as e:
+        # All providers failed - return detailed error
+        await logger.aerror(
+            "All providers exhausted",
+            error_count=len(e.errors),
+            errors=[str(err) for err in e.errors],
+        )
+        raise HTTPException(
+            status_code=503,
+            detail={
+                "error": "all_providers_exhausted",
+                "message": "All providers failed to process request",
+                "provider_errors": [
+                    {
+                        "provider": err.provider,
+                        "message": err.message,
+                        "status_code": getattr(err, 'status_code', None),
+                        "type": type(err).__name__,
+                    }
+                    for err in e.errors
+                ],
+            }
+        )
     except asyncio.TimeoutError:
         raise HTTPException(
             status_code=504,
-            detail="Request timed out waiting for available capacity"
+            detail={
+                "error": "timeout",
+                "message": "Request timed out waiting for available capacity",
+            }
         )
     except RuntimeError as e:
-        raise HTTPException(status_code=503, detail=str(e))
+        raise HTTPException(
+            status_code=503,
+            detail={
+                "error": "runtime_error",
+                "message": str(e),
+            }
+        )
     except Exception as e:
-        await logger.aerror("Chat completion failed", error=str(e))
-        raise HTTPException(status_code=500, detail=str(e))
+        await logger.aerror("Chat completion failed", error=str(e), error_type=type(e).__name__)
+        raise HTTPException(
+            status_code=500,
+            detail={
+                "error": "internal_error",
+                "message": str(e),
+            }
+        )
 
 
 @app.post("/v1/batch/chat/completions", response_model=BatchResponse)

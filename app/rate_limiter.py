@@ -22,6 +22,11 @@ class RateLimitBucket:
     tokens_remaining: int = field(init=False)
     window_start: datetime = field(init=False)
     
+    # Exhausted state - set when we get a 429 from the provider
+    # This means the provider's actual limit is lower than configured
+    _exhausted: bool = field(init=False, default=False)
+    _exhausted_at: Optional[datetime] = field(init=False, default=None)
+    
     # Lock for thread-safe operations
     _lock: asyncio.Lock = field(default_factory=asyncio.Lock, repr=False)
     
@@ -29,6 +34,8 @@ class RateLimitBucket:
         self.requests_remaining = self.requests_per_minute
         self.tokens_remaining = self.tokens_per_minute
         self.window_start = datetime.now()
+        self._exhausted = False
+        self._exhausted_at = None
     
     async def _maybe_reset_window(self) -> None:
         """Reset the window if a minute has passed."""
@@ -37,6 +44,14 @@ class RateLimitBucket:
             self.requests_remaining = self.requests_per_minute
             self.tokens_remaining = self.tokens_per_minute
             self.window_start = now
+            # Reset exhausted state on new window
+            if self._exhausted:
+                self._exhausted = False
+                self._exhausted_at = None
+                await logger.ainfo(
+                    "Rate limit exhausted state reset",
+                    bucket=self.name,
+                )
             await logger.adebug(
                 "Rate limit window reset",
                 bucket=self.name,
@@ -48,6 +63,9 @@ class RateLimitBucket:
         """Check if we can acquire a request slot."""
         async with self._lock:
             await self._maybe_reset_window()
+            # If exhausted by 429, don't allow until window resets
+            if self._exhausted:
+                return False
             return (
                 self.requests_remaining > 0 and 
                 self.tokens_remaining >= estimated_tokens
@@ -60,6 +78,15 @@ class RateLimitBucket:
         """
         async with self._lock:
             await self._maybe_reset_window()
+            
+            # If exhausted by 429, don't allow until window resets
+            if self._exhausted:
+                await logger.adebug(
+                    "Rate limited (exhausted by 429)",
+                    bucket=self.name,
+                    exhausted_at=self._exhausted_at,
+                )
+                return False
             
             if self.requests_remaining <= 0:
                 await logger.adebug(
@@ -81,6 +108,28 @@ class RateLimitBucket:
             self.requests_remaining -= 1
             self.tokens_remaining -= estimated_tokens
             return True
+    
+    async def mark_exhausted(self) -> None:
+        """
+        Mark this bucket as exhausted due to 429 from provider.
+        
+        This prevents further requests until the window resets,
+        even if our internal tracking thinks we have capacity.
+        """
+        async with self._lock:
+            self._exhausted = True
+            self._exhausted_at = datetime.now()
+            self.requests_remaining = 0  # Also zero out remaining
+            await logger.awarning(
+                "Bucket marked as exhausted (provider 429)",
+                bucket=self.name,
+                reset_at=self.reset_at,
+            )
+    
+    @property
+    def is_exhausted(self) -> bool:
+        """Check if bucket is exhausted."""
+        return self._exhausted
     
     async def release_tokens(self, actual_tokens: int, estimated_tokens: int) -> None:
         """
@@ -122,7 +171,13 @@ class RateLimitBucket:
             "requests_per_minute": self.requests_per_minute,
             "tokens_per_minute": self.tokens_per_minute,
             "reset_at": self.reset_at,
-            "is_available": self.requests_remaining > 0 and self.tokens_remaining > 100,
+            "is_exhausted": self._exhausted,
+            "exhausted_at": self._exhausted_at,
+            "is_available": (
+                not self._exhausted and 
+                self.requests_remaining > 0 and 
+                self.tokens_remaining > 100
+            ),
         }
 
 

@@ -76,6 +76,8 @@ class ProviderStatus(BaseModel):
     requests_per_minute: int
     tokens_per_minute: int
     reset_at: datetime
+    is_exhausted: bool = False  # True if provider returned 429
+    exhausted_at: Optional[datetime] = None  # When provider was marked exhausted
     is_available: bool
 
 

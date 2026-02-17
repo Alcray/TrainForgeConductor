@@ -10,6 +10,13 @@ import structlog
 from app.models import ChatCompletionRequest, ChatCompletionResponse
 from app.providers.base import BaseProvider, ProviderKey
 from app.rate_limiter import RateLimiterManager
+from app.exceptions import (
+    ProviderError,
+    RateLimitError,
+    CapabilityError,
+    ProviderUnavailableError,
+    AllProvidersExhaustedError,
+)
 
 logger = structlog.get_logger()
 
@@ -164,86 +171,210 @@ class Scheduler:
         request: ChatCompletionRequest,
         estimated_tokens: int,
     ) -> Optional[ChatCompletionResponse]:
-        """Try to execute a request immediately if capacity available."""
-        provider, key = await self._select_provider_and_key(
-            estimated_tokens,
-            preferred_provider=request.provider
-        )
+        """
+        Try to execute a request immediately if capacity available.
         
-        if provider and key:
-            if await key.acquire(estimated_tokens):
-                try:
-                    return await provider.chat_completion(key, request)
-                except Exception as e:
-                    await logger.aerror(
-                        "Immediate execution failed",
-                        provider=provider.name,
-                        error=str(e)
-                    )
-                    raise
+        On retryable errors (429, capability issues), tries next provider.
+        Returns None if no capacity available (will be queued).
+        Raises AllProvidersExhaustedError if all providers failed.
+        """
+        tried_providers: set[str] = set()
+        errors: list[ProviderError] = []
         
-        return None
-    
-    async def _execute_request(self, pending: PendingRequest) -> ChatCompletionResponse:
-        """Execute a pending request, waiting for capacity if needed."""
-        max_attempts = 10
-        attempt = 0
-        
-        while attempt < max_attempts:
-            attempt += 1
-            
+        while True:
             provider, key = await self._select_provider_and_key(
-                pending.estimated_tokens,
-                preferred_provider=pending.preferred_provider
+                estimated_tokens,
+                preferred_provider=request.provider,
+                exclude_providers=tried_providers,
             )
             
-            if provider and key:
-                if await key.acquire(pending.estimated_tokens):
-                    try:
-                        return await provider.chat_completion(key, pending.request)
-                    except Exception as e:
-                        await logger.aerror(
-                            "Request execution failed",
-                            provider=provider.name,
-                            error=str(e)
-                        )
-                        # Don't retry on API errors, just raise
-                        raise
+            if not provider or not key:
+                # No more providers available
+                if errors:
+                    # We tried some providers and they all failed
+                    raise AllProvidersExhaustedError(errors)
+                # No capacity available at all, return None to queue
+                return None
             
-            # No capacity available, wait a bit
+            tried_providers.add(f"{provider.name}:{key.key_name}")
+            
+            if not await key.acquire(estimated_tokens):
+                # This key doesn't have capacity, try next
+                continue
+            
+            try:
+                return await provider.chat_completion(key, request)
+                
+            except RateLimitError as e:
+                # Mark key as exhausted and try next provider
+                await key.bucket.mark_exhausted()
+                errors.append(e)
+                await logger.awarning(
+                    "Rate limit hit, trying next provider",
+                    provider=provider.name,
+                    key=key.key_name,
+                    error=str(e),
+                )
+                continue
+                
+            except CapabilityError as e:
+                # This provider can't handle this request, try next
+                errors.append(e)
+                await logger.awarning(
+                    "Capability error, trying next provider",
+                    provider=provider.name,
+                    capability=e.capability,
+                    error=str(e),
+                )
+                continue
+                
+            except ProviderUnavailableError as e:
+                # Provider is down, try next
+                errors.append(e)
+                await logger.awarning(
+                    "Provider unavailable, trying next",
+                    provider=provider.name,
+                    error=str(e),
+                )
+                continue
+                
+            except Exception as e:
+                # Unknown error - log it and try next provider
+                await logger.aerror(
+                    "Unexpected error, trying next provider",
+                    provider=provider.name,
+                    error=str(e),
+                    error_type=type(e).__name__,
+                )
+                errors.append(ProviderError(
+                    message=str(e),
+                    provider=provider.name,
+                    retryable=True,
+                ))
+                continue
+    
+    async def _execute_request(self, pending: PendingRequest) -> ChatCompletionResponse:
+        """
+        Execute a pending request, waiting for capacity if needed.
+        
+        Retries with different providers on retryable errors.
+        """
+        max_wait_attempts = 30  # Max times to wait for capacity (30 seconds)
+        wait_attempt = 0
+        errors: list[ProviderError] = []
+        
+        while wait_attempt < max_wait_attempts:
+            tried_providers: set[str] = set()
+            
+            # Try all available providers
+            while True:
+                provider, key = await self._select_provider_and_key(
+                    pending.estimated_tokens,
+                    preferred_provider=pending.preferred_provider,
+                    exclude_providers=tried_providers,
+                )
+                
+                if not provider or not key:
+                    # No more providers to try right now
+                    break
+                
+                tried_providers.add(f"{provider.name}:{key.key_name}")
+                
+                if not await key.acquire(pending.estimated_tokens):
+                    continue
+                
+                try:
+                    return await provider.chat_completion(key, pending.request)
+                    
+                except RateLimitError as e:
+                    await key.bucket.mark_exhausted()
+                    errors.append(e)
+                    await logger.awarning(
+                        "Rate limit hit on queued request, trying next provider",
+                        provider=provider.name,
+                        key=key.key_name,
+                    )
+                    continue
+                    
+                except CapabilityError as e:
+                    errors.append(e)
+                    await logger.awarning(
+                        "Capability error on queued request, trying next provider",
+                        provider=provider.name,
+                        capability=e.capability,
+                    )
+                    continue
+                    
+                except ProviderUnavailableError as e:
+                    errors.append(e)
+                    await logger.awarning(
+                        "Provider unavailable for queued request, trying next",
+                        provider=provider.name,
+                    )
+                    continue
+                    
+                except Exception as e:
+                    await logger.aerror(
+                        "Unexpected error on queued request",
+                        provider=provider.name,
+                        error=str(e),
+                    )
+                    errors.append(ProviderError(
+                        message=str(e),
+                        provider=provider.name,
+                        retryable=True,
+                    ))
+                    continue
+            
+            # All providers tried, wait for capacity to free up
+            wait_attempt += 1
             await asyncio.sleep(1.0)
         
-        raise RuntimeError("Failed to execute request after maximum attempts")
+        # All attempts exhausted
+        if errors:
+            raise AllProvidersExhaustedError(errors)
+        raise RuntimeError("Failed to execute request: no providers available")
     
     async def _select_provider_and_key(
         self,
         estimated_tokens: int,
         preferred_provider: Optional[str] = None,
+        exclude_providers: Optional[set[str]] = None,
     ) -> tuple[Optional[BaseProvider], Optional[ProviderKey]]:
-        """Select a provider and key based on the scheduling strategy."""
+        """
+        Select a provider and key based on the scheduling strategy.
+        
+        Args:
+            estimated_tokens: Estimated tokens for the request
+            preferred_provider: Force a specific provider if specified
+            exclude_providers: Set of "provider:key" strings to skip (already tried)
+        """
+        exclude_providers = exclude_providers or set()
         
         # If a specific provider is requested
         if preferred_provider and preferred_provider in self.providers:
             provider = self.providers[preferred_provider]
-            key = await provider.get_available_key(estimated_tokens)
+            key = await provider.get_available_key(estimated_tokens, exclude_providers)
             if key:
                 return provider, key
             return None, None
         
         if self.strategy == SchedulingStrategy.ROUND_ROBIN:
-            return await self._select_round_robin(estimated_tokens)
+            return await self._select_round_robin(estimated_tokens, exclude_providers)
         elif self.strategy == SchedulingStrategy.LEAST_LOADED:
-            return await self._select_least_loaded(estimated_tokens)
+            return await self._select_least_loaded(estimated_tokens, exclude_providers)
         elif self.strategy == SchedulingStrategy.SEQUENTIAL:
-            return await self._select_sequential(estimated_tokens)
+            return await self._select_sequential(estimated_tokens, exclude_providers)
         
         return None, None
     
     async def _select_round_robin(
         self,
         estimated_tokens: int,
+        exclude_providers: Optional[set[str]] = None,
     ) -> tuple[Optional[BaseProvider], Optional[ProviderKey]]:
         """Round-robin selection across providers."""
+        exclude_providers = exclude_providers or set()
         provider_names = list(self.providers.keys())
         if not provider_names:
             return None, None
@@ -252,7 +383,7 @@ class Scheduler:
         for i in range(len(provider_names)):
             idx = (self._current_provider_index + i) % len(provider_names)
             provider = self.providers[provider_names[idx]]
-            key = await provider.get_available_key(estimated_tokens)
+            key = await provider.get_available_key(estimated_tokens, exclude_providers)
             
             if key:
                 self._current_provider_index = (idx + 1) % len(provider_names)
@@ -263,14 +394,20 @@ class Scheduler:
     async def _select_least_loaded(
         self,
         estimated_tokens: int,
+        exclude_providers: Optional[set[str]] = None,
     ) -> tuple[Optional[BaseProvider], Optional[ProviderKey]]:
         """Select the provider/key with the most remaining capacity."""
+        exclude_providers = exclude_providers or set()
         best_provider = None
         best_key = None
         best_capacity = -1
         
         for provider in self.providers.values():
             for key in provider.keys:
+                # Skip excluded provider:key combinations
+                if f"{provider.name}:{key.key_name}" in exclude_providers:
+                    continue
+                    
                 if await key.is_available(estimated_tokens):
                     # Calculate remaining capacity (prioritize by requests + tokens)
                     capacity = (
@@ -287,10 +424,12 @@ class Scheduler:
     async def _select_sequential(
         self,
         estimated_tokens: int,
+        exclude_providers: Optional[set[str]] = None,
     ) -> tuple[Optional[BaseProvider], Optional[ProviderKey]]:
         """Use providers sequentially (fill one before moving to next)."""
+        exclude_providers = exclude_providers or set()
         for provider in self.providers.values():
-            key = await provider.get_available_key(estimated_tokens)
+            key = await provider.get_available_key(estimated_tokens, exclude_providers)
             if key:
                 return provider, key
         return None, None

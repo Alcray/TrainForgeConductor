@@ -67,15 +67,32 @@ class BaseProvider(ABC):
         """Add an API key to this provider."""
         self.keys.append(key)
     
-    async def get_available_key(self, estimated_tokens: int = 100) -> Optional[ProviderKey]:
-        """Get an available key using round-robin with fallback."""
+    async def get_available_key(
+        self,
+        estimated_tokens: int = 100,
+        exclude_keys: Optional[set[str]] = None,
+    ) -> Optional[ProviderKey]:
+        """
+        Get an available key using round-robin with fallback.
+        
+        Args:
+            estimated_tokens: Estimated tokens for the request
+            exclude_keys: Set of "provider:key" strings to skip (already tried)
+        """
         if not self.keys:
             return None
+        
+        exclude_keys = exclude_keys or set()
         
         # Try starting from current index
         for i in range(len(self.keys)):
             idx = (self._current_key_index + i) % len(self.keys)
             key = self.keys[idx]
+            
+            # Skip excluded keys
+            if f"{self.name}:{key.key_name}" in exclude_keys:
+                continue
+                
             if await key.is_available(estimated_tokens):
                 self._current_key_index = (idx + 1) % len(self.keys)
                 return key
