@@ -25,9 +25,6 @@ from app.models_mapping import ModelMapper, DEFAULT_MODEL
 from app.exceptions import (
     AllProvidersExhaustedError,
     MaxRetriesExhaustedError,
-    RateLimitError,
-    CapabilityError,
-    ProviderUnavailableError,
 )
 
 # Configure structured logging
