@@ -27,6 +27,8 @@ OpenAI-compatible chat completion endpoint.
 | `top_p` | float | | 1.0 | Nucleus sampling (0-1) |
 | `stop` | array | | null | Stop sequences |
 | `provider` | string | | null | Force specific provider: `"cerebras"` or `"nvidia"` |
+| `auto_retry` | bool | | true | Automatically retry on transient failures (rate limits, provider errors) with exponential backoff. When enabled, the conductor keeps retrying internally so the caller always gets an answer. |
+| `max_retries` | int | | 10 | Maximum retry attempts when `auto_retry` is enabled (1–50). After this many failed rounds, the conductor gives up and returns a detailed retry log. |
 
 ### Message Object
 
@@ -59,7 +61,8 @@ OpenAI-compatible chat completion endpoint.
     "total_tokens": 18
   },
   "provider": "cerebras",
-  "provider_key_name": "my-cerebras"
+  "provider_key_name": "my-cerebras",
+  "retry_count": 0
 }
 ```
 
@@ -201,7 +204,63 @@ Simple health check endpoint.
 
 ## Error Responses
 
-### 503 Service Unavailable
+All error responses use a structured JSON format inside `detail`.
+
+### 503 — Max Retries Exhausted (auto_retry enabled)
+
+Returned when `auto_retry` is enabled and the conductor exhausted all retry attempts.
+The `retry_log` array contains a detailed record of every attempt so you can see exactly what happened.
+
+```json
+{
+  "detail": {
+    "error": "max_retries_exhausted",
+    "message": "Request failed after 10 attempts over 180.5s",
+    "total_attempts": 10,
+    "total_duration_seconds": 180.5,
+    "retry_log": [
+      {
+        "attempt": 1,
+        "timestamp": "2026-02-17T12:00:01.123456",
+        "error_type": "AllProvidersExhaustedError",
+        "error_message": "All providers failed: ...",
+        "provider_errors": [
+          {"provider": "cerebras", "type": "RateLimitError", "message": "Rate limit exceeded"},
+          {"provider": "nvidia", "type": "ProviderUnavailableError", "message": "NVIDIA server error"}
+        ],
+        "wait_seconds": 2.0
+      },
+      {
+        "attempt": 2,
+        "timestamp": "2026-02-17T12:00:05.456789",
+        "error_type": "no_capacity",
+        "error_message": "No provider capacity available, waiting for rate limits to reset",
+        "provider_errors": [],
+        "wait_seconds": 4.0
+      }
+    ]
+  }
+}
+```
+
+### 503 — All Providers Exhausted (auto_retry disabled)
+
+Returned when `auto_retry` is disabled and all providers fail on the first try.
+
+```json
+{
+  "detail": {
+    "error": "all_providers_exhausted",
+    "message": "All providers failed to process request",
+    "provider_errors": [
+      {"provider": "cerebras", "message": "Rate limit exceeded", "status_code": 429, "type": "RateLimitError"},
+      {"provider": "nvidia", "message": "NVIDIA server error", "status_code": 503, "type": "ProviderUnavailableError"}
+    ]
+  }
+}
+```
+
+### 503 — No Providers Configured
 
 ```json
 {
@@ -209,19 +268,25 @@ Simple health check endpoint.
 }
 ```
 
-### 504 Gateway Timeout
+### 504 — Gateway Timeout
 
 ```json
 {
-  "detail": "Request timed out waiting for available capacity"
+  "detail": {
+    "error": "timeout",
+    "message": "Request timed out waiting for available capacity"
+  }
 }
 ```
 
-### 500 Internal Server Error
+### 500 — Internal Server Error
 
 ```json
 {
-  "detail": "Error message from provider"
+  "detail": {
+    "error": "internal_error",
+    "message": "Error message from provider"
+  }
 }
 ```
 

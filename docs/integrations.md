@@ -200,6 +200,146 @@ curl http://localhost:8000/v1/models | jq
 
 ---
 
+## Auto-Retry (Persistent Error Handling)
+
+By default, TrainForgeConductor automatically retries on transient failures — rate limits (429),
+provider outages (5xx), and temporary unavailability — with exponential backoff. The caller
+always gets an answer without having to implement retry logic on their side.
+
+If all retry attempts are exhausted (default: 10), the conductor returns a `503` with
+a full `retry_log` detailing every attempt.
+
+### Default behavior (auto-retry on)
+
+No extra fields needed. The conductor handles everything internally:
+
+```python
+import requests
+
+# Just send your request — retries happen internally
+response = requests.post(
+    "http://localhost:8000/v1/chat/completions",
+    json={
+        "model": "llama-70b",
+        "messages": [{"role": "user", "content": "Hello!"}]
+    },
+    timeout=300  # allow time for retries (worst case ~3 min for 10 retries)
+)
+
+data = response.json()
+print(data["choices"][0]["message"]["content"])
+
+# Check if retries were needed
+if data.get("retry_count", 0) > 0:
+    print(f"Succeeded after {data['retry_count']} retries")
+```
+
+### Disable auto-retry (handle errors yourself)
+
+Set `auto_retry` to `false` to get immediate errors, just like before:
+
+```python
+response = requests.post(
+    "http://localhost:8000/v1/chat/completions",
+    json={
+        "model": "llama-70b",
+        "messages": [{"role": "user", "content": "Hello!"}],
+        "auto_retry": False
+    }
+)
+
+if response.status_code != 200:
+    # Handle the error on your side
+    print(f"Error: {response.json()['detail']}")
+```
+
+### Custom retry limit
+
+Lower `max_retries` for faster failure, or raise it for more persistence:
+
+```python
+# Fail faster: only retry 3 times (~14s worst case)
+response = requests.post(
+    "http://localhost:8000/v1/chat/completions",
+    json={
+        "model": "llama-70b",
+        "messages": [{"role": "user", "content": "Hello!"}],
+        "max_retries": 3
+    },
+    timeout=60
+)
+
+# More persistent: retry up to 20 times (~8 min worst case)
+response = requests.post(
+    "http://localhost:8000/v1/chat/completions",
+    json={
+        "model": "llama-70b",
+        "messages": [{"role": "user", "content": "Hello!"}],
+        "max_retries": 20
+    },
+    timeout=600
+)
+```
+
+### Inspecting the retry log on failure
+
+When retries are exhausted, the error response includes a full log:
+
+```python
+response = requests.post(
+    "http://localhost:8000/v1/chat/completions",
+    json={
+        "model": "llama-70b",
+        "messages": [{"role": "user", "content": "Hello!"}],
+        "max_retries": 5
+    },
+    timeout=120
+)
+
+if response.status_code == 503:
+    error = response.json()["detail"]
+    if error.get("error") == "max_retries_exhausted":
+        print(f"Failed after {error['total_attempts']} attempts "
+              f"over {error['total_duration_seconds']:.1f}s")
+        for entry in error["retry_log"]:
+            print(f"  Attempt {entry['attempt']}: {entry['error_type']} "
+                  f"(waited {entry['wait_seconds']}s)")
+            for pe in entry.get("provider_errors", []):
+                print(f"    - {pe['provider']}: {pe['type']}: {pe['message']}")
+```
+
+### curl examples
+
+```bash
+# Default: auto-retry enabled, up to 10 attempts
+curl -X POST http://localhost:8000/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "llama-70b",
+    "messages": [{"role": "user", "content": "Hello!"}]
+  }'
+
+# Disable auto-retry
+curl -X POST http://localhost:8000/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "llama-70b",
+    "messages": [{"role": "user", "content": "Hello!"}],
+    "auto_retry": false
+  }'
+
+# Custom retry limit
+curl -X POST http://localhost:8000/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "llama-70b",
+    "messages": [{"role": "user", "content": "Hello!"}],
+    "max_retries": 3
+  }'
+```
+
+---
+
 ## Batch Processing
 
 Send multiple requests at once for maximum throughput:
