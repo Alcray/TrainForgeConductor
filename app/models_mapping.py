@@ -129,11 +129,27 @@ class ModelMapper:
     """Maps unified model names to provider-specific names."""
 
     def __init__(self, custom_mappings: dict = None):
+        """
+        Initialize with optional custom mappings from config.
+
+        Args:
+            custom_mappings: Dict of {unified_name: {provider: provider_name}}
+        """
         self.mappings = DEFAULT_MODEL_MAPPING.copy()
         if custom_mappings:
             self.mappings.update(custom_mappings)
 
     def get_provider_model(self, unified_name: str, provider: str) -> str:
+        """
+        Get the provider-specific model name.
+
+        Args:
+            unified_name: The unified model name (e.g., "llama-70b")
+            provider: The provider name (e.g., "cerebras", "nvidia")
+
+        Returns:
+            Provider-specific model name
+        """
         if not unified_name:
             unified_name = DEFAULT_MODEL
         name_lower = unified_name.lower().strip()
@@ -144,7 +160,9 @@ class ModelMapper:
         return unified_name
 
     def get_available_models(self) -> list[str]:
+        """Get list of available unified model names."""
         return list(self.mappings.keys())
 
     def add_mapping(self, unified_name: str, provider_models: dict):
+        """Add a custom model mapping."""
         self.mappings[unified_name.lower()] = provider_models

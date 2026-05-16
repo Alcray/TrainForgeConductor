@@ -22,7 +22,7 @@ from app.exceptions import (
 logger = structlog.get_logger()
 
 
-class SambaNoveProvider(BaseProvider):
+class SambaNovaProvider(BaseProvider):
     """SambaNova provider — free tier, fast Llama inference."""
 
     name = "sambanova"

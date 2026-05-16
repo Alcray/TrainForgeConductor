@@ -163,5 +163,4 @@ class CohereProvider(BaseProvider):
             raise
         except Exception as e:
             await logger.aerror("Cohere request failed", error=str(e))
-            raise
-        
+            raise        

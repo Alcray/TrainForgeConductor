@@ -9,7 +9,7 @@ from .openrouter import OpenRouterProvider
 from .deepseek import DeepSeekProvider
 from .huggingface import HuggingFaceProvider
 from .cohere import CohereProvider
-from .sambanova import SambaNoveProvider
+from .sambanova import SambaNovaProvider
 
 __all__ = [
     "BaseProvider",
@@ -23,5 +23,5 @@ __all__ = [
     "DeepSeekProvider",
     "HuggingFaceProvider",
     "CohereProvider",
-    "SambaNoveProvider",
+    "SambaNovaProvider",
 ]
