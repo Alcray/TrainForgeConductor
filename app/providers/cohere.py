@@ -76,10 +76,6 @@ class CohereProvider(BaseProvider):
             choice = data["choices"][0]
             usage = data.get("usage", {})
 
-            total_tokens = usage.get("total_tokens", 0)
-            if total_tokens > 0:
-                await key.bucket.consume_tokens(total_tokens)
-
             return ChatCompletionResponse(
                 id=data.get("id", f"cohere-{int(time.time())}"),
                 created=data.get("created", int(time.time())),
@@ -163,4 +159,4 @@ class CohereProvider(BaseProvider):
             raise
         except Exception as e:
             await logger.aerror("Cohere request failed", error=str(e))
-            raise        
+            raise       

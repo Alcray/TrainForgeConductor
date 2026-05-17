@@ -76,10 +76,6 @@ class GeminiProvider(BaseProvider):
             choice = data["choices"][0]
             usage = data.get("usage", {})
 
-            total_tokens = usage.get("total_tokens", 0)
-            if total_tokens > 0:
-                await key.bucket.consume_tokens(total_tokens)
-
             return ChatCompletionResponse(
                 id=data.get("id", f"gemini-{int(time.time())}"),
                 created=data.get("created", int(time.time())),
