@@ -1,4 +1,4 @@
-"""NVIDIA NIM provider implementation."""
+"""DeepSeek provider implementation."""
 
 import time
 import httpx
@@ -22,12 +22,12 @@ from app.exceptions import (
 logger = structlog.get_logger()
 
 
-class NvidiaProvider(BaseProvider):
-    """NVIDIA NIM provider (via build.nvidia.com or self-hosted)."""
+class DeepSeekProvider(BaseProvider):
+    """DeepSeek provider — free tier with strong coding models."""
 
-    name = "nvidia"
+    name = "deepseek"
 
-    def __init__(self, base_url: str = "https://integrate.api.nvidia.com/v1", model_mapper: ModelMapper = None):
+    def __init__(self, base_url: str = "https://api.deepseek.com/v1", model_mapper: ModelMapper = None):
         super().__init__(base_url, model_mapper)
 
     async def chat_completion(
@@ -35,7 +35,7 @@ class NvidiaProvider(BaseProvider):
         key: ProviderKey,
         request: ChatCompletionRequest,
     ) -> ChatCompletionResponse:
-        """Execute chat completion via NVIDIA NIM API."""
+        """Execute chat completion via DeepSeek API."""
 
         model = self.get_model_name(request.model)
 
@@ -58,7 +58,7 @@ class NvidiaProvider(BaseProvider):
         client = await self.get_client()
 
         await logger.ainfo(
-            "Sending request to NVIDIA NIM",
+            "Sending request to DeepSeek",
             model=model,
             key_name=key.key_name,
             messages_count=len(request.messages),
@@ -81,7 +81,7 @@ class NvidiaProvider(BaseProvider):
                 await key.bucket.consume_tokens(total_tokens)
 
             return ChatCompletionResponse(
-                id=data.get("id", f"nvidia-{int(time.time())}"),
+                id=data.get("id", f"deepseek-{int(time.time())}"),
                 created=data.get("created", int(time.time())),
                 model=model,
                 choices=[
@@ -108,7 +108,7 @@ class NvidiaProvider(BaseProvider):
             response_text = e.response.text
 
             await logger.aerror(
-                "NVIDIA NIM API error",
+                "DeepSeek API error",
                 status_code=status_code,
                 response=response_text,
                 key_name=key.key_name,
@@ -127,22 +127,22 @@ class NvidiaProvider(BaseProvider):
                 raise ProviderUnavailableError(
                     provider=self.name,
                     status_code=status_code,
-                    message=f"NVIDIA server error: {response_text[:200]}",
+                    message=f"DeepSeek server error: {response_text[:200]}",
                 )
 
             if status_code == 400:
                 response_lower = response_text.lower()
-                if "tool" in response_lower or "function" in response_lower:
-                    raise CapabilityError(
-                        provider=self.name,
-                        capability="parallel_tool_calls",
-                        message=f"Tool calling error: {response_text[:200]}",
-                    )
                 if "image" in response_lower or "vision" in response_lower:
                     raise CapabilityError(
                         provider=self.name,
                         capability="vision",
-                        message=f"Vision/image error: {response_text[:200]}",
+                        message=f"Vision not supported: {response_text[:200]}",
+                    )
+                if "tool" in response_lower or "function" in response_lower:
+                    raise CapabilityError(
+                        provider=self.name,
+                        capability="tool_calls",
+                        message=f"Tool calling error: {response_text[:200]}",
                     )
                 raise CapabilityError(
                     provider=self.name,
@@ -153,7 +153,7 @@ class NvidiaProvider(BaseProvider):
             raise
 
         except httpx.TimeoutException as e:
-            await logger.aerror("NVIDIA NIM request timeout", error=str(e))
+            await logger.aerror("DeepSeek request timeout", error=str(e))
             raise ProviderUnavailableError(
                 provider=self.name,
                 status_code=504,
@@ -162,5 +162,5 @@ class NvidiaProvider(BaseProvider):
         except (RateLimitError, CapabilityError, ProviderUnavailableError):
             raise
         except Exception as e:
-            await logger.aerror("NVIDIA NIM request failed", error=str(e))
+            await logger.aerror("DeepSeek request failed", error=str(e))
             raise
