@@ -63,6 +63,80 @@ logger = structlog.get_logger()
 scheduler: Optional[Scheduler] = None
 model_mapper: Optional[ModelMapper] = None
 
+# Provider definition table — add new providers here only
+PROVIDER_DEFINITIONS = [
+    {
+        "name": "cerebras",
+        "class": CerebrasProvider,
+        "default_base_url": "https://api.cerebras.ai/v1",
+        "default_rpm": 1000,
+        "default_tpm": 1_000_000,
+    },
+    {
+        "name": "nvidia",
+        "class": NvidiaProvider,
+        "default_base_url": "https://integrate.api.nvidia.com/v1",
+        "default_rpm": 60,
+        "default_tpm": 100_000,
+    },
+    {
+        "name": "groq",
+        "class": GroqProvider,
+        "default_base_url": "https://api.groq.com/openai/v1",
+        "default_rpm": 30,
+        "default_tpm": 6_000,
+    },
+    {
+        "name": "gemini",
+        "class": GeminiProvider,
+        "default_base_url": "https://generativelanguage.googleapis.com/v1beta/openai",
+        "default_rpm": 15,
+        "default_tpm": 1_000_000,
+    },
+    {
+        "name": "mistral",
+        "class": MistralProvider,
+        "default_base_url": "https://api.mistral.ai/v1",
+        "default_rpm": 60,
+        "default_tpm": 100_000,
+    },
+    {
+        "name": "openrouter",
+        "class": OpenRouterProvider,
+        "default_base_url": "https://openrouter.ai/api/v1",
+        "default_rpm": 60,
+        "default_tpm": 100_000,
+    },
+    {
+        "name": "deepseek",
+        "class": DeepSeekProvider,
+        "default_base_url": "https://api.deepseek.com/v1",
+        "default_rpm": 60,
+        "default_tpm": 100_000,
+    },
+    {
+        "name": "huggingface",
+        "class": HuggingFaceProvider,
+        "default_base_url": "https://api-inference.huggingface.co/v1",
+        "default_rpm": 30,
+        "default_tpm": 50_000,
+    },
+    {
+        "name": "cohere",
+        "class": CohereProvider,
+        "default_base_url": "https://api.cohere.com/compatibility/v1",
+        "default_rpm": 20,
+        "default_tpm": 100_000,
+    },
+    {
+        "name": "sambanova",
+        "class": SambaNovaProvider,
+        "default_base_url": "https://api.sambanova.ai/v1",
+        "default_rpm": 60,
+        "default_tpm": 100_000,
+    },
+]
+
 
 async def initialize_scheduler(config: dict) -> Scheduler:
     """Initialize the scheduler with providers from config."""
@@ -83,268 +157,45 @@ async def initialize_scheduler(config: dict) -> Scheduler:
     )
 
     sched = Scheduler(strategy=strategy)
-
     providers_config = config.get("providers", {})
 
-    # Initialize Cerebras
-    cerebras_config = providers_config.get("cerebras", {})
-    if cerebras_config.get("enabled", False) and cerebras_config.get("keys"):
-        provider = CerebrasProvider(
-            base_url=cerebras_config.get("base_url", "https://api.cerebras.ai/v1"),
-            model_mapper=model_mapper,
-        )
-        for i, key_config in enumerate(cerebras_config.get("keys", [])):
-            key_name = key_config.get("name", f"cerebras-key-{i+1}")
-            bucket = RateLimitBucket(
-                name=f"cerebras:{key_name}",
-                requests_per_minute=key_config.get("requests_per_minute", 1000),
-                tokens_per_minute=key_config.get("tokens_per_minute", 1_000_000),
-            )
-            provider_key = ProviderKey(
-                provider_name="cerebras",
-                key_name=key_name,
-                api_key=key_config["api_key"],
-                bucket=bucket,
-                base_url=provider.base_url,
-            )
-            provider.add_key(provider_key)
-        if provider.keys:
-            await sched.add_provider(provider)
-            await logger.ainfo("Cerebras provider initialized", keys_count=len(provider.keys))
+    # Initialize all providers from the definition table
+    for definition in PROVIDER_DEFINITIONS:
+        name = definition["name"]
+        provider_config = providers_config.get(name, {})
 
-    # Initialize NVIDIA NIM
-    nvidia_config = providers_config.get("nvidia", {})
-    if nvidia_config.get("enabled", False) and nvidia_config.get("keys"):
-        provider = NvidiaProvider(
-            base_url=nvidia_config.get("base_url", "https://integrate.api.nvidia.com/v1"),
-            model_mapper=model_mapper,
-        )
-        for i, key_config in enumerate(nvidia_config.get("keys", [])):
-            key_name = key_config.get("name", f"nvidia-key-{i+1}")
-            bucket = RateLimitBucket(
-                name=f"nvidia:{key_name}",
-                requests_per_minute=key_config.get("requests_per_minute", 60),
-                tokens_per_minute=key_config.get("tokens_per_minute", 100_000),
-            )
-            provider_key = ProviderKey(
-                provider_name="nvidia",
-                key_name=key_name,
-                api_key=key_config["api_key"],
-                bucket=bucket,
-                base_url=provider.base_url,
-            )
-            provider.add_key(provider_key)
-        if provider.keys:
-            await sched.add_provider(provider)
-            await logger.ainfo("NVIDIA NIM provider initialized", keys_count=len(provider.keys))
+        if not provider_config.get("enabled", False):
+            continue
+        if not provider_config.get("keys"):
+            continue
 
-    # Initialize Groq
-    groq_config = providers_config.get("groq", {})
-    if groq_config.get("enabled", False) and groq_config.get("keys"):
-        provider = GroqProvider(
-            base_url=groq_config.get("base_url", "https://api.groq.com/openai/v1"),
+        provider = definition["class"](
+            base_url=provider_config.get("base_url", definition["default_base_url"]),
             model_mapper=model_mapper,
         )
-        for i, key_config in enumerate(groq_config.get("keys", [])):
-            key_name = key_config.get("name", f"groq-key-{i+1}")
-            bucket = RateLimitBucket(
-                name=f"groq:{key_name}",
-                requests_per_minute=key_config.get("requests_per_minute", 30),
-                tokens_per_minute=key_config.get("tokens_per_minute", 6000),
-            )
-            provider_key = ProviderKey(
-                provider_name="groq",
-                key_name=key_name,
-                api_key=key_config["api_key"],
-                bucket=bucket,
-                base_url=provider.base_url,
-            )
-            provider.add_key(provider_key)
-        if provider.keys:
-            await sched.add_provider(provider)
-            await logger.ainfo("Groq provider initialized", keys_count=len(provider.keys))
 
-    # Initialize Gemini
-    gemini_config = providers_config.get("gemini", {})
-    if gemini_config.get("enabled", False) and gemini_config.get("keys"):
-        provider = GeminiProvider(
-            base_url=gemini_config.get("base_url", "https://generativelanguage.googleapis.com/v1beta/openai"),
-            model_mapper=model_mapper,
-        )
-        for i, key_config in enumerate(gemini_config.get("keys", [])):
-            key_name = key_config.get("name", f"gemini-key-{i+1}")
+        for i, key_config in enumerate(provider_config.get("keys", [])):
+            key_name = key_config.get("name", f"{name}-key-{i+1}")
             bucket = RateLimitBucket(
-                name=f"gemini:{key_name}",
-                requests_per_minute=key_config.get("requests_per_minute", 15),
-                tokens_per_minute=key_config.get("tokens_per_minute", 1_000_000),
+                name=f"{name}:{key_name}",
+                requests_per_minute=key_config.get("requests_per_minute", definition["default_rpm"]),
+                tokens_per_minute=key_config.get("tokens_per_minute", definition["default_tpm"]),
             )
             provider_key = ProviderKey(
-                provider_name="gemini",
+                provider_name=name,
                 key_name=key_name,
                 api_key=key_config["api_key"],
                 bucket=bucket,
                 base_url=provider.base_url,
             )
             provider.add_key(provider_key)
-        if provider.keys:
-            await sched.add_provider(provider)
-            await logger.ainfo("Gemini provider initialized", keys_count=len(provider.keys))
 
-    # Initialize Mistral
-    mistral_config = providers_config.get("mistral", {})
-    if mistral_config.get("enabled", False) and mistral_config.get("keys"):
-        provider = MistralProvider(
-            base_url=mistral_config.get("base_url", "https://api.mistral.ai/v1"),
-            model_mapper=model_mapper,
-        )
-        for i, key_config in enumerate(mistral_config.get("keys", [])):
-            key_name = key_config.get("name", f"mistral-key-{i+1}")
-            bucket = RateLimitBucket(
-                name=f"mistral:{key_name}",
-                requests_per_minute=key_config.get("requests_per_minute", 60),
-                tokens_per_minute=key_config.get("tokens_per_minute", 100_000),
-            )
-            provider_key = ProviderKey(
-                provider_name="mistral",
-                key_name=key_name,
-                api_key=key_config["api_key"],
-                bucket=bucket,
-                base_url=provider.base_url,
-            )
-            provider.add_key(provider_key)
         if provider.keys:
             await sched.add_provider(provider)
-            await logger.ainfo("Mistral provider initialized", keys_count=len(provider.keys))
-
-    # Initialize OpenRouter
-    openrouter_config = providers_config.get("openrouter", {})
-    if openrouter_config.get("enabled", False) and openrouter_config.get("keys"):
-        provider = OpenRouterProvider(
-            base_url=openrouter_config.get("base_url", "https://openrouter.ai/api/v1"),
-            model_mapper=model_mapper,
-        )
-        for i, key_config in enumerate(openrouter_config.get("keys", [])):
-            key_name = key_config.get("name", f"openrouter-key-{i+1}")
-            bucket = RateLimitBucket(
-                name=f"openrouter:{key_name}",
-                requests_per_minute=key_config.get("requests_per_minute", 60),
-                tokens_per_minute=key_config.get("tokens_per_minute", 100_000),
+            await logger.ainfo(
+                f"{name.upper()} provider initialized",
+                keys_count=len(provider.keys)
             )
-            provider_key = ProviderKey(
-                provider_name="openrouter",
-                key_name=key_name,
-                api_key=key_config["api_key"],
-                bucket=bucket,
-                base_url=provider.base_url,
-            )
-            provider.add_key(provider_key)
-        if provider.keys:
-            await sched.add_provider(provider)
-            await logger.ainfo("OpenRouter provider initialized", keys_count=len(provider.keys))
-
-    # Initialize DeepSeek
-    deepseek_config = providers_config.get("deepseek", {})
-    if deepseek_config.get("enabled", False) and deepseek_config.get("keys"):
-        provider = DeepSeekProvider(
-            base_url=deepseek_config.get("base_url", "https://api.deepseek.com/v1"),
-            model_mapper=model_mapper,
-        )
-        for i, key_config in enumerate(deepseek_config.get("keys", [])):
-            key_name = key_config.get("name", f"deepseek-key-{i+1}")
-            bucket = RateLimitBucket(
-                name=f"deepseek:{key_name}",
-                requests_per_minute=key_config.get("requests_per_minute", 60),
-                tokens_per_minute=key_config.get("tokens_per_minute", 100_000),
-            )
-            provider_key = ProviderKey(
-                provider_name="deepseek",
-                key_name=key_name,
-                api_key=key_config["api_key"],
-                bucket=bucket,
-                base_url=provider.base_url,
-            )
-            provider.add_key(provider_key)
-        if provider.keys:
-            await sched.add_provider(provider)
-            await logger.ainfo("DeepSeek provider initialized", keys_count=len(provider.keys))
-
-    # Initialize HuggingFace
-    huggingface_config = providers_config.get("huggingface", {})
-    if huggingface_config.get("enabled", False) and huggingface_config.get("keys"):
-        provider = HuggingFaceProvider(
-            base_url=huggingface_config.get("base_url", "https://api-inference.huggingface.co/v1"),
-            model_mapper=model_mapper,
-        )
-        for i, key_config in enumerate(huggingface_config.get("keys", [])):
-            key_name = key_config.get("name", f"huggingface-key-{i+1}")
-            bucket = RateLimitBucket(
-                name=f"huggingface:{key_name}",
-                requests_per_minute=key_config.get("requests_per_minute", 30),
-                tokens_per_minute=key_config.get("tokens_per_minute", 50_000),
-            )
-            provider_key = ProviderKey(
-                provider_name="huggingface",
-                key_name=key_name,
-                api_key=key_config["api_key"],
-                bucket=bucket,
-                base_url=provider.base_url,
-            )
-            provider.add_key(provider_key)
-        if provider.keys:
-            await sched.add_provider(provider)
-            await logger.ainfo("HuggingFace provider initialized", keys_count=len(provider.keys))
-
-    # Initialize Cohere
-    cohere_config = providers_config.get("cohere", {})
-    if cohere_config.get("enabled", False) and cohere_config.get("keys"):
-        provider = CohereProvider(
-            base_url=cohere_config.get("base_url", "https://api.cohere.com/compatibility/v1"),
-            model_mapper=model_mapper,
-        )
-        for i, key_config in enumerate(cohere_config.get("keys", [])):
-            key_name = key_config.get("name", f"cohere-key-{i+1}")
-            bucket = RateLimitBucket(
-                name=f"cohere:{key_name}",
-                requests_per_minute=key_config.get("requests_per_minute", 20),
-                tokens_per_minute=key_config.get("tokens_per_minute", 100_000),
-            )
-            provider_key = ProviderKey(
-                provider_name="cohere",
-                key_name=key_name,
-                api_key=key_config["api_key"],
-                bucket=bucket,
-                base_url=provider.base_url,
-            )
-            provider.add_key(provider_key)
-        if provider.keys:
-            await sched.add_provider(provider)
-            await logger.ainfo("Cohere provider initialized", keys_count=len(provider.keys))
-
-    # Initialize SambaNova
-    sambanova_config = providers_config.get("sambanova", {})
-    if sambanova_config.get("enabled", False) and sambanova_config.get("keys"):
-        provider = SambaNovaProvider(
-            base_url=sambanova_config.get("base_url", "https://api.sambanova.ai/v1"),
-            model_mapper=model_mapper,
-        )
-        for i, key_config in enumerate(sambanova_config.get("keys", [])):
-            key_name = key_config.get("name", f"sambanova-key-{i+1}")
-            bucket = RateLimitBucket(
-                name=f"sambanova:{key_name}",
-                requests_per_minute=key_config.get("requests_per_minute", 60),
-                tokens_per_minute=key_config.get("tokens_per_minute", 100_000),
-            )
-            provider_key = ProviderKey(
-                provider_name="sambanova",
-                key_name=key_name,
-                api_key=key_config["api_key"],
-                bucket=bucket,
-                base_url=provider.base_url,
-            )
-            provider.add_key(provider_key)
-        if provider.keys:
-            await sched.add_provider(provider)
-            await logger.ainfo("SambaNova provider initialized", keys_count=len(provider.keys))
 
     await sched.start()
     return sched
@@ -357,11 +208,9 @@ async def lifespan(app: FastAPI):
 
     await logger.ainfo("Starting TrainForgeConductor...")
 
-    # Load configuration
     config = load_config(settings.config_path)
     await logger.ainfo("Configuration loaded", config_path=settings.config_path)
 
-    # Initialize scheduler
     scheduler = await initialize_scheduler(config)
 
     if not scheduler.providers:
@@ -376,7 +225,6 @@ async def lifespan(app: FastAPI):
 
     yield
 
-    # Shutdown
     await logger.ainfo("Shutting down TrainForgeConductor...")
     if scheduler:
         await scheduler.stop()
